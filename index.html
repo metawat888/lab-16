@@ -9,21 +9,24 @@
             margin: 0; padding: 0; background-color: #F8C300;
             font-family: 'Sarabun', sans-serif; display: flex; flex-direction: column;
             height: 100vh; overflow: hidden;
+            touch-action: none; overscroll-behavior: none;
         }
 
         #toolbar {
             background-color: rgba(0, 0, 0, 0.85); padding: 15px 20px;
             display: flex; gap: 12px; justify-content: center; align-items: center;
             box-shadow: 0 4px 15px rgba(0,0,0,0.4); z-index: 20;
+            flex-wrap: wrap;
         }
 
         .tool-btn {
             padding: 10px 18px; font-size: 15px; font-weight: bold; cursor: pointer;
             border: none; border-radius: 6px; background-color: #f1f1f1; color: #222;
             transition: all 0.2s; box-shadow: 0 3px 6px rgba(0,0,0,0.2);
+            flex: 1 1 auto; text-align: center;
         }
         .tool-btn:hover { background-color: #fff; transform: translateY(-2px); box-shadow: 0 5px 10px rgba(0,0,0,0.3); }
-        .danger-btn { background-color: #ff4c4c; color: white; margin-left: 20px; }
+        .danger-btn { background-color: #ff4c4c; color: white; margin-left: 0; }
         .danger-btn:hover { background-color: #ff1a1a; color: white; }
         
         #workspace {
@@ -153,7 +156,6 @@
 </div>
 
 <div id="workspace">
-    <div class="title">กระดานต่อวงจรไฟฟ้า (Flow Simulation)</div>
     <canvas id="wireCanvas"></canvas>
 </div>
 
@@ -249,8 +251,35 @@
                 <div class="terminal positive" data-type="positive" data-role="inv"></div>
                 <div class="terminal negative" data-type="negative" data-role="inv"></div>
             </div>
-        `
+    `
     };
+
+    function getEventPos(e) {
+        if (e.touches && e.touches.length > 0) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        if (e.changedTouches && e.changedTouches.length > 0) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+        return { x: e.clientX, y: e.clientY };
+    }
+
+    function tryConnectTerminals(t1, t2) {
+        if (!t1 || !t2 || t1 === t2) return;
+        const typeA = t1.dataset.type;
+        const typeB = t2.dataset.type;
+        const compTypeA = t1.closest('.component').dataset.componentType;
+        const compTypeB = t2.closest('.component').dataset.componentType;
+        
+        if (typeA === typeB || (typeA !== typeB && compTypeA === compTypeB)) {
+            const exists = wires.some(w => 
+                (w.start.id === t1.id && w.end.id === t2.id) || 
+                (w.start.id === t2.id && w.end.id === t1.id)
+            );
+            if(!exists) {
+                wires.push({ start: t1, end: t2 });
+                checkCircuitLogic();
+            }
+        } else {
+            showToast("ระวัง! การต่อขั้วบวกเข้าขั้วลบข้ามชนิดอุปกรณ์อาจทำให้ลัดวงจรได้", "error");
+        }
+    }
 
     function addComponent(type) {
         const compId = 'comp_' + Date.now();
@@ -279,6 +308,7 @@
         if (type === 'breaker') {
             const switchBtn = compElement.querySelector('.switch');
             switchBtn.addEventListener('mousedown', (e) => e.stopPropagation()); // กันลากตอนกดสวิตช์
+            switchBtn.addEventListener('touchstart', (e) => e.stopPropagation(), {passive: true}); // กันลากบนจอสัมผัส
             switchBtn.addEventListener('click', (e) => {
                 compElement.classList.toggle('breaker-on');
                 checkCircuitLogic(); // อัปเดตวงจรทันทีที่สับเบรกเกอร์
@@ -288,12 +318,36 @@
         workspace.appendChild(compElement);
         components[compId] = compElement;
         
-        // ดับเบิลคลิกเพื่อลบอุปกรณ์
+        // ดับเบิลคลิกเพื่อลบอุปกรณ์ (สำหรับคอมพิวเตอร์)
         compElement.addEventListener('dblclick', (e) => {
             if(e.target.classList.contains('terminal') || e.target.classList.contains('switch')) return;
             e.stopPropagation();
             deleteComponent(compId);
         });
+
+        // แตะสองครั้งบนจอสัมผัสเพื่อลบอุปกรณ์ (สำหรับมือถือ/แท็บเล็ต)
+        let lastTapTime = 0;
+        compElement.addEventListener('touchstart', (e) => {
+            if(e.target.classList.contains('terminal') || e.target.classList.contains('switch')) return;
+            
+            const currentTime = new Date().getTime();
+            const tapLength = currentTime - lastTapTime;
+            if (tapLength < 300 && tapLength > 0) {
+                e.preventDefault();
+                deleteComponent(compId);
+                return;
+            }
+            lastTapTime = currentTime;
+
+            isDraggingComp = true;
+            draggedComp = compElement;
+            const rect = compElement.getBoundingClientRect();
+            const pos = getEventPos(e);
+            dragOffset.x = pos.x - rect.left;
+            dragOffset.y = pos.y - rect.top;
+            Object.values(components).forEach(c => c.style.zIndex = 5);
+            compElement.style.zIndex = 10;
+        }, {passive: false});
 
         // Dragging Logic (Smooth, no jumping)
         compElement.addEventListener('mousedown', (e) => {
@@ -309,35 +363,22 @@
 
         // Wiring Logic
         compElement.querySelectorAll('.terminal').forEach(term => {
-            term.addEventListener('mousedown', (e) => {
+            const startWiring = (e) => {
                 isWiring = true;
                 startTerminal = term;
                 e.stopPropagation();
-            });
+            };
+
+            term.addEventListener('mousedown', startWiring);
+            term.addEventListener('touchstart', (e) => {
+                startWiring(e);
+                e.preventDefault(); // กันไม่ให้เกิดเหตุการณ์เมาส์ซ้ำซ้อนกันบนจอสัมผัส
+            }, {passive: false});
 
             term.addEventListener('mouseup', (e) => {
-                if (isWiring && startTerminal && startTerminal !== term) {
-                    const typeA = startTerminal.dataset.type;
-                    const typeB = term.dataset.type;
-                    
-                    // อนุญาตให้ต่อ Series (บวกเข้าลบ) ได้ถ้าเป็นอุปกรณ์ประเภทเดียวกัน
-                    const compTypeA = startTerminal.closest('.component').dataset.componentType;
-                    const compTypeB = term.closest('.component').dataset.componentType;
-                    
-                    if (typeA === typeB || (typeA !== typeB && compTypeA === compTypeB)) {
-                        const exists = wires.some(w => 
-                            (w.start.id === startTerminal.id && w.end.id === term.id) || 
-                            (w.start.id === term.id && w.end.id === startTerminal.id)
-                        );
-                        if(!exists) {
-                            wires.push({ start: startTerminal, end: term });
-                            checkCircuitLogic(); // Re-evaluate circuit on new wire
-                        }
-                    } else {
-                        showToast("ระวัง! การต่อขั้วบวกเข้าขั้วลบข้ามชนิดอุปกรณ์อาจทำให้ลัดวงจรได้", "error");
-                    }
-                }
+                if (isWiring) tryConnectTerminals(startTerminal, term);
             });
+            // หมายเหตุ: การปล่อยนิ้ว (touchend) จัดการที่ window level 
         });
     }
 
@@ -354,10 +395,14 @@
         Object.keys(components).forEach(compId => deleteComponent(compId));
     }
 
-    workspace.addEventListener('mousemove', (e) => {
+    function handleMove(e) {
+        if (!isDraggingComp && !isWiring) return;
+        if (e.type === 'touchmove') e.preventDefault(); // กันหน้าจอเลื่อน (Scroll) ขณะลากอุปกรณ์
+        
         const rect = workspace.getBoundingClientRect();
-        const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
+        const pos = getEventPos(e);
+        const mx = pos.x - rect.left;
+        const my = pos.y - rect.top;
 
         if (isDraggingComp && draggedComp) {
             let newX = mx - dragOffset.x;
@@ -372,15 +417,32 @@
         } else if (isWiring) {
             mousePos = { x: mx, y: my };
         }
-    });
+    }
 
-    window.addEventListener('mouseup', () => {
+    workspace.addEventListener('mousemove', handleMove);
+    workspace.addEventListener('touchmove', handleMove, {passive: false});
+
+    function handleUp(e) {
+        // เมื่อปล่อยนิ้วตอนลากสายไฟ ให้เช็คว่าปล่อยบนขั้วต่อไฟหรือไม่
+        if (isWiring && e.type === 'touchend') {
+            const pos = getEventPos(e);
+            const endElement = document.elementFromPoint(pos.x, pos.y);
+            if (endElement && endElement.classList.contains('terminal')) {
+                tryConnectTerminals(startTerminal, endElement);
+            }
+        }
+        
         isDraggingComp = false; draggedComp = null;
         if (isWiring) { isWiring = false; startTerminal = null; }
-    });
+    }
+
+    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('touchend', handleUp);
+    
     workspace.addEventListener('mouseleave', () => {
         isDraggingComp = false; isWiring = false;
     });
+    workspace.addEventListener('touchcancel', handleUp);
 
     workspace.addEventListener('dblclick', (e) => {
         if (e.target === canvas || e.target === workspace) {
@@ -393,6 +455,28 @@
                 wires.splice(wireIndex, 1);
                 checkCircuitLogic(); // Re-evaluate circuit on wire delete
             }
+        }
+    });
+
+    // ดับเบิลแท็บบนหน้าจอเพื่อลบสายไฟ
+    let lastWorkspaceTapTime = 0;
+    workspace.addEventListener('touchstart', (e) => {
+        if (e.target === canvas || e.target === workspace) {
+            const currentTime = new Date().getTime();
+            const tapLength = currentTime - lastWorkspaceTapTime;
+            if (tapLength < 300 && tapLength > 0) {
+                const rect = workspace.getBoundingClientRect();
+                const pos = getEventPos(e);
+                const mouseX = pos.x - rect.left;
+                const mouseY = pos.y - rect.top;
+                
+                const wireIndex = getWireAt(mouseX, mouseY);
+                if (wireIndex !== -1) {
+                    wires.splice(wireIndex, 1);
+                    checkCircuitLogic();
+                }
+            }
+            lastWorkspaceTapTime = currentTime;
         }
     });
 
